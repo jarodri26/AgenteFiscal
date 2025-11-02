@@ -431,11 +431,21 @@ class BancoDeDados:
         columns = ", ".join(campos.keys())
         placeholders = ", ".join("?" for _ in campos)
         sql = f"INSERT INTO documentos ({columns}) VALUES ({placeholders})"
-        cur = self.conn.cursor
         cur = self.conn.cursor()
-        cur.execute(sql, list(campos.values()))
-        self.conn.commit()
-        return int(cur.lastrowid)
+        try:
+            cur.execute(sql, list(campos.values()))
+            self.conn.commit()
+            return int(cur.lastrowid)
+        except sqlite3.IntegrityError as ie:
+            # Trata duplicidade por UNIQUE(hash): retorna o id existente
+            if "UNIQUE constraint failed: documentos.hash" in str(ie) and "hash" in campos:
+                try:
+                    existing_id = self.find_documento_by_hash(str(campos.get("hash")))
+                    if existing_id is not None:
+                        return int(existing_id)
+                except Exception:
+                    pass
+            raise
 
     def atualizar_documento_campo(self, documento_id: int, campo: str, valor: Any) -> None:
         sql = f"UPDATE documentos SET {campo} = ? WHERE id = ?"

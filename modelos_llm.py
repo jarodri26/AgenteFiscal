@@ -125,8 +125,21 @@ def _get_provider(llm: BaseChatModel) -> str:
     return "desconhecido"
 
 def _bind_temperature(llm: BaseChatModel, temperature: Optional[float]) -> BaseChatModel:
-    """Tenta llm.bind(temperature=...), senão retorna o próprio llm."""
+    """Aplica temperatura no call quando suportado.
+
+    Observação: para o provedor Gemini (ChatGoogleGenerativeAI), a API recente
+    não aceita `temperature` como argumento direto de geração. Nesses casos,
+    evitamos usar `.bind(temperature=...)` e confiamos na temperatura definida
+    na construção do modelo (make_llm). Para outros provedores, tentamos o bind.
+    """
     if temperature is None:
+        return llm
+    # Evita bind para Gemini, que pode lançar: unexpected keyword 'temperature'
+    try:
+        provider = getattr(llm, "_provider", _get_provider(llm)).lower()
+    except Exception:
+        provider = _get_provider(llm).lower()
+    if provider == "gemini":
         return llm
     try:
         return llm.bind(temperature=temperature)  # type: ignore[attr-defined]

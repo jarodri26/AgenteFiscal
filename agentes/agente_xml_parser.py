@@ -91,6 +91,23 @@ class AgenteXMLParser:
             extras["emitente_endereco_tokens"] = self._norm_tokens(campos.get("emitente_endereco"))
             extras["destinatario_endereco_tokens"] = self._norm_tokens(campos.get("destinatario_endereco"))
 
+            # 3.3) Checagem de duplicidade por hash antes de persistir
+            doc_hash = self.db.hash_bytes(conteudo)
+            existing_id = None
+            try:
+                existing_id = self.db.find_documento_by_hash(doc_hash)
+            except Exception:
+                existing_id = None
+
+            if existing_id:
+                # Documento já existe — não reinsere itens/impostos nem salva arquivo novamente.
+                doc_id = int(existing_id)
+                status = (self.db.get_documento(doc_id) or {}).get("status") or "processado"
+                # Mantém tipos e métricas; não sobrescreve caminhos do arquivo.
+                log.info("Documento duplicado detectado pelo hash; retornando existente (id=%s).", doc_id)
+                # Encaminha para o finally para registrar extracao/métricas leves
+                return doc_id
+
             # 4) Salvar arquivo físico (mantemos como caminho_xml e caminho_arquivo)
             caminho_salvo = str(self.db.save_upload(nome, conteudo))
 
@@ -99,7 +116,7 @@ class AgenteXMLParser:
                 nome_arquivo=nome,
                 tipo=tipo,
                 origem=origem,
-                hash=self.db.hash_bytes(conteudo),
+                hash=doc_hash,
 
                 # Identificação
                 chave_acesso=campos.get("chave_acesso"),

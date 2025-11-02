@@ -35,7 +35,8 @@ class SecurityException(Exception):
 
 
 # Módulos que o *código gerado* pode importar (dentro de solve)
-ALLOWED_IMPORTS = {"pandas", "numpy", "matplotlib", "plotly", "traceback"}
+# Nota: "json" é seguro (sem I/O) e frequentemente usado pelo LLM para serialização simples.
+ALLOWED_IMPORTS = {"pandas", "numpy", "matplotlib", "plotly", "traceback", "json"}
 
 def _restricted_import(name: str, *args, **kwargs):
     """Hook de import para o código do usuário (solve)."""

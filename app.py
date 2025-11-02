@@ -15,6 +15,10 @@ from dotenv import load_dotenv
 import secrets
 from datetime import datetime, timedelta, timezone
 import re
+try:
+    import yaml  # type: ignore
+except Exception:
+    yaml = None
 
 # =================== Config da Página & Tema ===================
 st.set_page_config(
@@ -42,7 +46,7 @@ st.markdown(
             }
             .stTabs [data-baseweb="tab"]{ padding:.35rem .85rem; }
 
-      .chip {
+            .chip {
         display:inline-block; padding:.25rem .6rem; border-radius:999px;
         color:#fff; font-size:.80rem; margin-right:.35rem; margin-bottom:.3rem;
       }
@@ -58,14 +62,23 @@ st.markdown(
       .soft { color:#6b7280; }
       .badge { font-size:.75rem; padding:.15rem .4rem; border-radius:6px; border:1px solid #E5E7EB; background:#F3F4F6; }
       .timeline li { margin-bottom:.25rem; }
-            .chat-wrap { display:flex; flex-direction:column; gap:.5rem; }
-            .chat-bubble-user { background:#e9f3ff; border:1px solid #cfe4ff; padding:10px 12px; border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
-            .chat-bubble-assistant { background:#f7f7f8; border:1px solid #ececec; padding:10px 12px; border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
-            .chat-meta { color:#6b7280; font-size:.8rem; margin-bottom:.35rem; }
-            .card { border:1px solid #E5E7EB; border-radius:10px; padding:.6rem .8rem; background:#fff; }
+                        .chat-wrap { display:flex; flex-direction:column; gap:.5rem; }
+                        .chat-bubble-user { background:#e9f3ff; border:1px solid #cfe4ff; color:#111 !important; padding:10px 12px; border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+                        .chat-bubble-assistant { background:#f7f7f8; border:1px solid #ececec; color:#111 !important; padding:10px 12px; border-radius:12px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+                        .chat-meta { color:#6b7280; font-size:.8rem; margin-bottom:.35rem; }
+                        .card { border:1px solid #E5E7EB; border-radius:10px; padding:.6rem .8rem; background:#fff; color:#111; }
             .card h5 { margin:.1rem 0 .4rem 0; }
             .btn-row { display:flex; gap:.5rem; align-items:center; }
             .tight-row { display:flex; gap:.75rem; align-items:flex-end; flex-wrap:wrap; }
+
+            /* Ajustes para tema escuro */
+            @media (prefers-color-scheme: dark) {
+                .chat-bubble-user { background:#0f172a; border-color:#1f2937; color:#e5e7eb !important; }
+                .chat-bubble-assistant { background:#111827; border-color:#1f2937; color:#e5e7eb !important; }
+                .chat-meta { color:#9ca3af; }
+                .card { background:#0b1220; border-color:#2b3440; color:#e5e7eb; }
+                .badge, .pill { background:#1f2937; border-color:#374151; color:#e5e7eb; }
+            }
     </style>
     """,
     unsafe_allow_html=True,
@@ -322,7 +335,9 @@ def join_impostos_itens(db: "BancoDeDados", documento_id: int) -> pd.DataFrame:
 
 def download_button_for_df(df: pd.DataFrame, label: str, file_name: str, help_text: Optional[str] = None):
     try:
-        data = (df or pd.DataFrame()).to_csv(index=False).encode("utf-8")
+        # Evita avaliar DataFrame em contexto booleano (ambíguo no pandas)
+        df_safe = df if df is not None else pd.DataFrame()
+        data = df_safe.to_csv(index=False).encode("utf-8")
         st.download_button(label, data=data, file_name=file_name, mime="text/csv", help=(help_text or ""))
     except Exception:
         pass
@@ -438,6 +453,42 @@ def score_pill(label: str, val: Optional[float]) -> str:
     c = "green" if val >= 0.80 else ("yellow" if val >= 0.60 else "red")
     return f"<span class='pill'><b>{label}</b>: <span class='soft'>{val:.2f}</span></span>"
 
+def review_reason_from_meta(doc: Dict[str, Any], meta: Dict[str, Any]) -> List[str]:
+    """Gera uma lista de possíveis motivos para revisão a partir do documento/meta.
+    Robusta a estruturas ausentes; usa campos simples e heurísticas leves.
+    """
+    reasons: List[str] = []
+    try:
+        if doc:
+            mr = (doc.get("motivo_rejeicao") or "").strip()
+            if mr:
+                reasons.append(mr)
+        r = (meta.get("risk") or {}) if isinstance(meta, dict) else {}
+        try:
+            score = r.get("score")
+            if isinstance(score, (int, float)) and float(score) >= 0.7:
+                reasons.append(f"Risco elevado (score {float(score):.2f})")
+        except Exception:
+            pass
+        dups = r.get("duplicates") if isinstance(r, dict) else None
+        if isinstance(dups, list) and dups:
+            reasons.append(f"Possíveis duplicatas: {', '.join(map(str, dups[:6]))}{'…' if len(dups) > 6 else ''}")
+        # Busca mensagens no blackboard
+        bb = (meta.get("blackboard") or {}) if isinstance(meta, dict) else {}
+        decs = bb.get("decisions") if isinstance(bb, dict) else None
+        if isinstance(decs, list):
+            msgs = [str((d or {}).get("msg", "")).strip() for d in decs if isinstance(d, dict)]
+            msgs = [m for m in msgs if m]
+            for m in msgs[-3:]:  # últimas mensagens
+                if any(k in m.lower() for k in ["revisao", "risco", "duplic", "erro", "inconsist", "valida"]):
+                    reasons.append(m)
+        # Fallback amigável
+        if not reasons:
+            reasons.append("Motivo específico não encontrado; documento marcado para revisão durante a validação.")
+    except Exception:
+        reasons.append("Falha ao recuperar motivo da revisão.")
+    return reasons
+
 def configure_llm(provider: str | None, model: str | None, api_key: str | None):
     try:
         if not provider or not model:
@@ -467,6 +518,7 @@ def _ensure_session_defaults():
         "llm_provider": "",
         "llm_model": "",
         "llm_api_key": "",
+        "llm_hydrated": False,
         "_prefs_loaded": False,
 
         # Upload
@@ -627,6 +679,25 @@ def ui_sidebar(db: BancoDeDados):
             except Exception:
                 pass
 
+        # Hidrata automaticamente a LLM a partir das preferências persistidas,
+        # caso ainda não haja instância ativa nesta sessão.
+        try:
+            if (
+                not st.session_state.llm_hydrated
+                and st.session_state.llm_instance is None
+                and st.session_state.llm_provider
+                and st.session_state.llm_model
+            ):
+                st.session_state.llm_instance = configure_llm(
+                    st.session_state.llm_provider,
+                    st.session_state.llm_model,
+                    st.session_state.llm_api_key,
+                )
+                st.session_state.llm_hydrated = True
+        except Exception:
+            # Mantém mensagem de status configurada pelo configure_llm, se houve
+            pass
+
         providers = ["", "gemini", "openai", "openrouter"]
         prov = st.selectbox("Provedor", providers, index=providers.index(st.session_state.llm_provider) if st.session_state.llm_provider in providers else 0)
         models: list[str] = []
@@ -753,6 +824,24 @@ def _read_meta(doc: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         return {}
 
+def _deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(a or {})
+    for k, v in (b or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+def _update_meta_json(db: "BancoDeDados", doc_id: int, patch: Dict[str, Any]) -> None:
+    try:
+        cur = db.get_documento(int(doc_id)) or {}
+        base = _read_meta(cur)
+        merged = _deep_merge(base, patch or {})
+        db.atualizar_documento_campos(int(doc_id), meta_json=json.dumps(merged, ensure_ascii=False))
+    except Exception:
+        pass
+
 def _meta_scores(meta: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     try:
         coverage = float(((meta.get("nlp") or {}).get("coverage", None)))
@@ -768,28 +857,7 @@ def _meta_scores(meta: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]
         sanity = None
     return coverage, sanity, match_score
 
-def _download_pacote_documento(db: BancoDeDados, doc_id: int) -> bytes:
-    doc = db.get_documento(doc_id) or {}
-    itens = db.query_table("itens", where=f"documento_id = {doc_id}") or pd.DataFrame()
-    impostos = pd.DataFrame()
-    if not itens.empty:
-        ids = tuple(itens["id"].unique().tolist())
-        if ids:
-            ids_sql = ", ".join(map(str, ids))
-            impostos = db.query_table("impostos", where=f"item_id IN ({ids_sql})")
-    meta = _read_meta(doc)
-    # zip em memória
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("documento.json", json.dumps(doc, ensure_ascii=False, indent=2))
-        z.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
-        z.writestr("itens.csv", itens.to_csv(index=False).encode("utf-8"))
-        z.writestr("impostos.csv", (impostos.to_csv(index=False).encode("utf-8") if not impostos.empty else b""))
-        # inclui caminho do arquivo original se existir (apenas referência)
-        if doc.get("caminho_arquivo"):
-            z.writestr("origem.txt", str(doc.get("caminho_arquivo")))
-    buf.seek(0)
-    return buf.read()
+# Função de pacote completo removida a pedido (não exibiremos mais o botão de download).
 
 # OCR removido do sistema — não utilizamos mais a tabela 'extracoes' na UI.
 
@@ -965,6 +1033,21 @@ def tab_auditoria(orch: Orchestrator, db: BancoDeDados):
                 ]
             ) 
 
+            # Reordenar colunas: primeiro bloco do Emitente, depois Destinatário
+            desired_order = [
+                "id","nome_arquivo","tipo","status","data_emissao","valor_total","risco","dup",
+                # Emitente
+                "emitente_nome","emitente_doc","emitente_uf","emit_municipio","emit_bairro","emit_endereco","emit_cep",
+                # Destinatário
+                "destinatario_nome","destinatario_doc","destinatario_uf","dest_municipio","dest_bairro","dest_endereco","dest_cep",
+                # Demais
+                "serie","numero_nota","chave_acesso","origem","motivo_rejeicao",
+            ]
+            others = [c for c in view.columns if c not in desired_order]
+            view = view[[c for c in desired_order if c in view.columns] + others]
+
+        # Toolbar de Ações em Lote foi movida para ABAIXO do grid
+
         st.data_editor(
             view,
             use_container_width=True, height=430, disabled=True,
@@ -994,10 +1077,63 @@ def tab_auditoria(orch: Orchestrator, db: BancoDeDados):
             },
             key="grid_docs_ro"
         )
-        # Ações de exportação
-        exp_c1, exp_c2 = st.columns([1,6])
-        with exp_c1:
-            download_button_for_df(view, "⬇️ Exportar CSV", "documentos.csv")
+        # Ações em Lote ABAIXO do grid: campo + checkbox na primeira linha; botões na segunda linha
+        with st.container(border=True):
+            st.markdown("**Ações em Lote**")
+            visible_ids = view["id"].dropna().astype(int).tolist() if "id" in view.columns else []
+            row1_sel, row1_chk = st.columns([8, 1])
+            with row1_chk:
+                # Espaço para alinhar verticalmente o checkbox com o campo ao lado
+                st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+                select_all = st.checkbox("Todos", value=False, key="bulk_all")
+            # Define seleção padrão ANTES de instanciar o multiselect (evita erro de session_state)
+            default_selected = visible_ids if select_all else st.session_state.get("bulk_ids", [])
+            with row1_sel:
+                _ = st.multiselect(
+                    "Selecionar IDs",
+                    options=visible_ids,
+                    default=default_selected,
+                    key="bulk_ids",
+                )
+            selected_ids = st.session_state.get("bulk_ids", default_selected)
+
+            role = (st.session_state.get("user_profile") or "operador").lower()
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                if st.button("✅ Aprovar", key="bulk_approve", use_container_width=True, disabled=(role!="admin" or not selected_ids)):
+                    for did in selected_ids:
+                        try:
+                            db.atualizar_documento_campos(int(did), status="processado", motivo_rejeicao="Aprovado em lote")
+                        except Exception:
+                            pass
+                    st.success(f"Aprovados: {len(selected_ids)}")
+                    st.rerun()
+            with b2:
+                if st.button("📝 Revisão", key="bulk_review", use_container_width=True, disabled=((role not in {"admin","auditor","conferente"}) or not selected_ids)):
+                    for did in selected_ids:
+                        try:
+                            db.atualizar_documento_campos(int(did), status="revisao_pendente")
+                        except Exception:
+                            pass
+                    st.success(f"Marcados p/ revisão: {len(selected_ids)}")
+                    st.rerun()
+            with b3:
+                if st.button("🔁 Revalidar", key="bulk_revalidate", use_container_width=True, disabled=((role not in {"admin","auditor","conferente"}) or not selected_ids)):
+                    with st.spinner("Revalidando em lote..."):
+                        for did in selected_ids:
+                            try:
+                                _ = orch.revalidar_documento(int(did))
+                            except Exception:
+                                pass
+                    st.success(f"Revalidados: {len(selected_ids)}")
+                    st.rerun()
+            with b4:
+                try:
+                    df_export = view[view["id"].isin(selected_ids)] if selected_ids else view
+                    download_button_for_df(df_export, "⬇️ Exportar", "documentos.csv")
+                except Exception:
+                    pass
+    # Relatórios Rápidos foram movidos para a aba Métricas para reduzir ruído na Auditoria.
     except Exception as e:
         st.error(f"Erro ao listar documentos: {e}")
         st.code(traceback.format_exc(), language="python")
@@ -1008,24 +1144,15 @@ def tab_auditoria(orch: Orchestrator, db: BancoDeDados):
 
     # Linha compacta: label + campo + botão alinhados
     st.markdown("**Documento ID**")
-    c_id, c_btn, c_dl = st.columns([0.6, 0.6, 2])
+    c_id, c_btn = st.columns([0.6, 0.6])
     with c_id:
         doc_id = st.number_input(label="Documento ID", label_visibility="collapsed", min_value=0, step=1, key="doc_id_detail")
     with c_btn:
         abrir = st.button("Abrir Detalhe", type="primary", use_container_width=True, disabled=(doc_id == 0))
-    with c_dl:
-        if doc_id > 0:
-            try:
-                data_zip = _download_pacote_documento(db, int(doc_id))
-                st.download_button(
-                    "⬇️ Baixar Pacote do Documento",
-                    data=data_zip,
-                    file_name=f"documento_{int(doc_id)}.zip",
-                    mime="application/zip",
-                    use_container_width=True
-                )
-            except Exception:
-                pass
+    # Botão de download de pacote completo removido a pedido.
+
+    # Painéis utilitários removidos daqui: Exportação/Ações em Lote ficam ABAIXO do grid;
+    # Relatórios Rápidos ficam na aba Métricas.
 
     # Mantém o documento aberto no estado para interações (ex.: RAG) sem perder a seção
     if abrir and doc_id > 0:
@@ -1059,6 +1186,14 @@ def tab_auditoria(orch: Orchestrator, db: BancoDeDados):
                 f"</div>",
                 unsafe_allow_html=True
             )
+            # Papel do usuário para edições e ações
+            user_role = (st.session_state.get("user_profile") or "operador").lower()
+            # Botões de ação foram movidos para o rodapé do detalhe, conforme solicitado
+
+            # Abas do detalhe
+            t_resumo, t_cab, t_itens, t_dup, t_hist, t_tec = st.tabs([
+                "Resumo", "Cabeçalho", "Itens & Impostos", "Duplicidade", "Histórico", "Técnicos"
+            ])
 
             # Campos de exibição (emitente/destinatário)
             e_doc = pick(header_df, ["emitente_cnpj", "emitente_cpf"])
@@ -1070,143 +1205,288 @@ def tab_auditoria(orch: Orchestrator, db: BancoDeDados):
             d_uf   = pick(header_df, ["destinatario_uf"])
             d_end  = pick(header_df, ["destinatario_endereco_full"])
 
-            col_left, col_right = st.columns([2, 1])
-            with col_left:
-                st.markdown(
-                    "<div class='card'><h5>Emitente</h5>"
-                    f"<div><b>{mask_doc(str(e_doc)) if e_doc and str(e_doc).strip() not in ('', '—') else '—'}</b> – {e_nome or '—'}"
-                    f"<br/><span class='soft'>{e_end or '—'} (UF: {e_uf or '—'})</span></div></div>",
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    "<div class='card'><h5>Destinatário</h5>"
-                    f"<div><b>{mask_doc(str(d_doc)) if d_doc and str(d_doc).strip() not in ('', '—') else '—'}</b> – {d_nome or '—'}"
-                    f"<br/><span class='soft'>{d_end or '—'} (UF: {d_uf or '—'})</span></div></div>",
-                    unsafe_allow_html=True
-                )
-
-                st.markdown(" ")
-                cols_to_show = [c for c in [
-                    "id","nome_arquivo","tipo","data_emissao","valor_total","status","serie","numero_nota","chave_acesso","motivo_rejeicao"
-                ] if c in header_df.columns]
-                st.data_editor(
-                    header_df[cols_to_show],
-                    use_container_width=True, height=120, disabled=True,
-                    key=f"doc_header_{doc_id}"
-                )
-
-                # Removidos: Endereços detalhados, XML e Validações (solicitado)
-                # Duplicatas detectadas (se houver)
+            with t_resumo:
+                # Explicar revisão e motivos
+                if st.button("🛈 Explicar revisão", key=f"btn_explain_{doc_id}"):
+                    reasons = review_reason_from_meta(doc, meta)
+                    st.info("\n".join([f"- {r}" for r in reasons]))
+                try:
+                    if str(doc_status).lower() in {"revisao_pendente", "revisão_pendente", "revisao", "revisão"}:
+                        reasons = review_reason_from_meta(doc, meta)
+                        with st.container(border=True):
+                            st.markdown("**Motivo(s) da Revisão**")
+                            for rtxt in reasons:
+                                st.markdown(f"- {rtxt}")
+                except Exception:
+                    pass
+                cA, cB = st.columns(2)
+                with cA:
+                    st.markdown(
+                        "<div class='card'><h5>Emitente</h5>"
+                        f"<div><b>{mask_doc(str(e_doc)) if e_doc and str(e_doc).strip() not in ('', '—') else '—'}</b> – {e_nome or '—'}"
+                        f"<br/><span class='soft'>{e_end or '—'} (UF: {e_uf or '—'})</span></div></div>",
+                        unsafe_allow_html=True
+                    )
+                with cB:
+                    st.markdown(
+                        "<div class='card'><h5>Destinatário</h5>"
+                        f"<div><b>{mask_doc(str(d_doc)) if d_doc and str(d_doc).strip() not in ('', '—') else '—'}</b> – {d_nome or '—'}"
+                        f"<br/><span class='soft'>{d_end or '—'} (UF: {d_uf or '—'})</span></div></div>",
+                        unsafe_allow_html=True
+                    )
+                # Pequena lista de duplicatas
                 try:
                     dup_ids = []
                     r = (meta.get("risk") or {})
                     if isinstance(r.get("duplicates"), list):
                         dup_ids = [int(x) for x in r.get("duplicates") if str(x).isdigit()]
                     if dup_ids:
-                        st.markdown(" ")
-                        with st.expander("🧭 Possíveis Duplicatas", expanded=False):
-                            df_all = tidy_dataframe(db.query_table("documentos"))
-                            df_dups = df_all[df_all["id"].isin(dup_ids)] if not df_all.empty else pd.DataFrame()
-                            if not df_dups.empty:
-                                cols = [c for c in ["id","nome_arquivo","tipo","data_emissao","emitente_nome","valor_total","status"] if c in df_dups.columns]
-                                st.data_editor(df_dups[cols], use_container_width=True, height=220, disabled=True, key=f"dup_tbl_{doc_id}")
-                                # Ações rápidas: abrir cada duplicata
-                                for did in dup_ids[:20]:
-                                    c1, c2 = st.columns([6,2])
-                                    with c1:
-                                        st.caption(f"Documento duplicado ID {did}")
-                                    with c2:
-                                        if st.button("Abrir", key=f"open_dup_{doc_id}_{did}"):
-                                            st.session_state.doc_id_detail = int(did)
-                                            st.session_state.doc_open_id = int(did)
-                                            st.rerun()
-                            else:
-                                st.info("IDs de duplicatas presentes, mas não foram encontrados na base.")
+                        df_all = tidy_dataframe(db.query_table("documentos"))
+                        df_dups = df_all[df_all["id"].isin(dup_ids)] if not df_all.empty else pd.DataFrame()
+                        if not df_dups.empty:
+                            cols = [c for c in ["id","nome_arquivo","tipo","data_emissao","emitente_nome","valor_total","status"] if c in df_dups.columns]
+                            st.data_editor(df_dups[cols], use_container_width=True, height=180, disabled=True, key=f"dup_tbl_{doc_id}")
                 except Exception:
                     pass
+
+            with t_cab:
+                cols_to_show = [c for c in [
+                    "id","nome_arquivo","tipo","status",
+                    "data_emissao","valor_total","serie","numero_nota","chave_acesso","motivo_rejeicao",
+                    "emitente_nome","emitente_uf","emitente_municipio","emitente_endereco",
+                    "destinatario_nome","destinatario_uf","destinatario_municipio","destinatario_endereco"
+                ] if c in header_df.columns]
+                can_edit_doc = user_role in {"admin", "auditor", "conferente"}
+                allow_edit = st.checkbox("Editar campos do documento", value=False, key=f"edit_doc_toggle_{doc_id}", disabled=not can_edit_doc)
+                edited_header_df = st.data_editor(
+                    header_df[cols_to_show],
+                    use_container_width=True, height=200, disabled=not allow_edit,
+                    key=f"doc_header_{doc_id}"
+                )
+                if allow_edit:
+                    _, c_save = st.columns([8,2])
+                    with c_save:
+                        if st.button("Salvar Documento", type="primary", use_container_width=True, key=f"btn_save_doc_{doc_id}"):
+                            try:
+                                base = header_df[cols_to_show].set_index("id") if "id" in header_df.columns else None
+                                new = edited_header_df.set_index("id") if "id" in edited_header_df.columns else None
+                                if base is None or new is None:
+                                    st.warning("Tabela precisa da coluna 'id' para salvar.")
+                                else:
+                                    allowed_edit_cols = [c for c in [
+                                        "data_emissao","valor_total","serie","numero_nota","chave_acesso","motivo_rejeicao",
+                                        "emitente_nome","emitente_uf","emitente_municipio","emitente_endereco",
+                                        "destinatario_nome","destinatario_uf","destinatario_municipio","destinatario_endereco"
+                                    ] if c in cols_to_show]
+                                    diffs: Dict[str, Any] = {}
+                                    for c in allowed_edit_cols:
+                                        old = str(base.iloc[0].get(c)) if not base.empty else ""
+                                        newv = str(new.iloc[0].get(c)) if not new.empty else ""
+                                        if old != newv:
+                                            diffs[c] = edited_header_df.iloc[0].get(c)
+                                    if diffs:
+                                        db.atualizar_documento_campos(int(doc_id), **diffs)
+                                        try:
+                                            for k, v in diffs.items():
+                                                db.inserir_revisao(
+                                                    documento_id=int(doc_id), campo=k,
+                                                    valor_anterior=str(base.iloc[0].get(k)) if not base.empty else None,
+                                                    valor_corrigido=str(v), usuario=(st.session_state.user_name or "revisor_ui")
+                                                )
+                                        except Exception:
+                                            pass
+                                        db.log("doc_update", st.session_state.user_name or "revisor_ui", f"doc_id={int(doc_id)} campos={list(diffs.keys())}")
+                                        st.success("Documento atualizado com sucesso.")
+                                        st.rerun()
+                                    else:
+                                        st.info("Nenhuma alteração no documento.")
+                            except Exception as e:
+                                st.error(f"Falha ao salvar documento: {e}")
+
+            with t_itens:
+                # Tabela única de Itens da Nota (editável onde faz sentido)
+                try:
+                    df_itens = join_impostos_itens(db, int(doc_id))
+                except Exception:
+                    df_itens = pd.DataFrame()
+                if df_itens is not None and not df_itens.empty:
+                    st.markdown("#### 🧾 Itens da Nota")
+                    q_local = st.text_input("Buscar nos itens (descrição/NCM/CFOP/código)", key=f"find_items_{doc_id}")
+                    cols_show = [c for c in [
+                        "id","numero_item","descricao","codigo_produto","ncm","cfop","unidade",
+                        "quantidade","valor_unitario","valor_total","desconto","outras_despesas",
+                        "icms_valor","ipi_valor","pis_valor","cofins_valor","iss_valor",
+                        "icms_aliquota","ipi_aliquota","pis_aliquota","cofins_aliquota","iss_aliquota"
+                    ] if c in df_itens.columns]
+                    non_editable = [c for c in [
+                        "id","numero_item","icms_valor","ipi_valor","pis_valor","cofins_valor","iss_valor",
+                        "icms_aliquota","ipi_aliquota","pis_aliquota","cofins_aliquota","iss_aliquota"
+                    ] if c in cols_show]
+                    column_config={
+                        "quantidade": st.column_config.NumberColumn("Quantidade", format="%.3f"),
+                        "valor_unitario": st.column_config.NumberColumn("Vlr Unit", format="R$ %.4f"),
+                        "valor_total": st.column_config.NumberColumn("Vlr Total", format="R$ %.2f"),
+                        "desconto": st.column_config.NumberColumn("Desc", format="R$ %.2f"),
+                        "outras_despesas": st.column_config.NumberColumn("Outras", format="R$ %.2f"),
+                        "icms_valor": st.column_config.NumberColumn("ICMS (R$)", format="R$ %.2f"),
+                        "ipi_valor": st.column_config.NumberColumn("IPI (R$)", format="R$ %.2f"),
+                        "pis_valor": st.column_config.NumberColumn("PIS (R$)", format="R$ %.2f"),
+                        "cofins_valor": st.column_config.NumberColumn("COFINS (R$)", format="R$ %.2f"),
+                        "iss_valor": st.column_config.NumberColumn("ISS (R$)", format="R$ %.2f"),
+                    }
+                    df_view = df_itens[cols_show].sort_values(by=[c for c in ["numero_item","descricao"] if c in df_itens.columns])
+                    if q_local:
+                        try:
+                            ql = q_local.strip().lower()
+                            mask = pd.Series([False]*len(df_view))
+                            for c in ["descricao","codigo_produto","ncm","cfop"]:
+                                if c in df_view.columns:
+                                    mask = mask | df_view[c].astype(str).str.lower().str.contains(ql, na=False)
+                            df_view = df_view[mask]
+                            st.caption(f"{len(df_view)} item(ns) correspondem ao filtro.")
+                        except Exception:
+                            pass
+                    edited_df = st.data_editor(
+                        df_view,
+                        use_container_width=True, height=320,
+                        disabled=non_editable or (user_role not in {"admin","auditor","conferente"}),
+                        column_config=column_config,
+                        key=f"grid_itens_single_{doc_id}"
+                    )
+                    # Botões à direita: Exportar e Salvar
+                    sp, c_export, c_save = st.columns([8,2,2])
+                    with c_export:
+                        download_button_for_df(
+                            df_view,
+                            "⬇️ Exportar Itens (CSV)",
+                            f"itens_{int(doc_id)}.csv",
+                            help_text="Itens com impostos por item, quando disponíveis."
+                        )
+                    with c_save:
+                        if st.button("Salvar Itens", type="primary", use_container_width=True, key=f"btn_save_itens_{doc_id}") and user_role in {"admin","auditor","conferente"}:
+                            base = df_view.set_index("id") if "id" in df_view.columns else None
+                            new = edited_df.set_index("id") if "id" in edited_df.columns else None
+                            if base is None or new is None:
+                                st.warning("Tabela de itens precisa da coluna 'id' para salvar.")
+                            else:
+                                editable_cols = [c for c in cols_show if c not in non_editable]
+                                updates = 0
+                                for iid, row_new in new.iterrows():
+                                    if iid in base.index:
+                                        diffs = {c: row_new.get(c) for c in editable_cols if (str(base.loc[iid].get(c)) != str(row_new.get(c)))}
+                                        if diffs:
+                                            sets = ", ".join([f"{k} = ?" for k in diffs.keys()])
+                                            vals = [row_new.get(k) for k in diffs.keys()]
+                                            try:
+                                                db.conn.execute(f"UPDATE itens SET {sets} WHERE id = ?", (*vals, int(iid)))
+                                                try:
+                                                    for k, v in diffs.items():
+                                                        db.inserir_revisao(
+                                                            documento_id=int(doc_id),
+                                                            campo=f"itens.{int(iid)}.{k}",
+                                                            valor_anterior=str(base.loc[iid].get(k)),
+                                                            valor_corrigido=str(v),
+                                                            usuario=(st.session_state.user_name or "revisor_ui"),
+                                                        )
+                                                except Exception:
+                                                    pass
+                                                updates += 1
+                                            except Exception as e:
+                                                st.error(f"Falha ao atualizar item {iid}: {e}")
+                                if updates:
+                                    db.conn.commit()
+                                    st.success(f"{updates} item(ns) atualizado(s).")
+                                    st.rerun()
+                                else:
+                                    st.info("Nenhuma alteração em itens.")
+                else:
+                    st.info("Sem itens registrados para este documento.")
+
+            with t_hist:
+                try:
+                    df_rev = db.query_table("revisoes", where=f"documento_id = {int(doc_id)}", order_by="data_revisao DESC")
+                except Exception:
+                    df_rev = pd.DataFrame()
+                if df_rev is None or df_rev.empty:
+                    st.info("Sem histórico de alterações.")
+                else:
+                    st.data_editor(df_rev[[c for c in ["id","campo","valor_anterior","valor_corrigido","usuario","data_revisao"] if c in df_rev.columns]], use_container_width=True, height=220, disabled=True, key=f"rev_hist_{doc_id}")
+                    rev_id = st.number_input("ID da revisão para reverter", min_value=0, step=1, key=f"rev_rollback_id_{doc_id}")
+                    if st.button("Reverter revisão selecionada", use_container_width=True, disabled=(user_role!="admin")) and rev_id>0:
+                        row = df_rev[df_rev["id"]==int(rev_id)]
+                        if row.empty:
+                            st.warning("ID de revisão não encontrado.")
+                        else:
+                            r = row.iloc[0].to_dict()
+                            campo = str(r.get("campo") or "")
+                            val = r.get("valor_anterior")
+                            try:
+                                if campo.startswith("itens."):
+                                    _, sid, scol = campo.split(".", 2)
+                                    db.conn.execute(f"UPDATE itens SET {scol} = ? WHERE id = ?", (val, int(sid)))
+                                    db.conn.commit()
+                                else:
+                                    db.atualizar_documento_campos(int(doc_id), **{campo: val})
+                                st.success("Reversão aplicada.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Falha ao reverter: {e}")
+
+            with t_dup:
+                try:
+                    dup_ids = []
+                    r = (meta.get("risk") or {})
+                    if isinstance(r.get("duplicates"), list):
+                        dup_ids = [int(x) for x in r.get("duplicates") if str(x).isdigit()]
+                    st.caption("Marque falsos positivos, arquive duplicatas ou vincule um original.")
+                    c1, c2, c3 = st.columns([3,1.2,1.8])
+                    target = c1.number_input("Vincular como duplicata de (ID)", min_value=0, step=1, key=f"dup_of_{doc_id}")
+                    with c2:
+                        st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+                        link_clicked = st.button("Vincular", use_container_width=True, key=f"btn_dup_link_{doc_id}")
+                    with c3:
+                        st.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
+                        arch_clicked = st.button("Arquivar duplicata", use_container_width=True, key=f"btn_dup_archive_{doc_id}")
+                    if link_clicked and target>0:
+                        _update_meta_json(db, int(doc_id), {"risk": {"duplicate_of": int(target)}})
+                        db.atualizar_documento_campos(int(doc_id), status="quarentena")
+                        st.success(f"Documento marcado como duplicata de {int(target)}.")
+                        st.rerun()
+                    if arch_clicked:
+                        db.atualizar_documento_campos(int(doc_id), status="quarentena")
+                        st.success("Documento arquivado como duplicata.")
+                        st.rerun()
+                    if dup_ids:
+                        for did in dup_ids[:20]:
+                            dcol1, dcol2 = st.columns([8,2])
+                            with dcol1:
+                                st.caption(f"Possível duplicata: ID {did}")
+                            with dcol2:
+                                if st.button("Falso positivo", key=f"dup_fp_{doc_id}_{did}"):
+                                    newrisk = dict(r)
+                                    newrisk["duplicates"] = [x for x in dup_ids if int(x)!=int(did)]
+                                    _update_meta_json(db, int(doc_id), {"risk": newrisk})
+                                    st.success(f"ID {did} removido da lista de duplicidade.")
+                                    st.rerun()
+                except Exception:
+                    pass
+
+            with t_tec:
+                if meta:
+                    st.json(meta)
+                else:
+                    st.info("Sem meta_json no documento.")
+                st.markdown("---")
+                _render_cognitive_timeline(meta)
         except Exception as e:
             st.error(f"Erro ao carregar detalhe do documento: {e}")
             st.code(traceback.format_exc(), language="python")
 
-        st.markdown("---")
-        # Tabela única de Itens da Nota (editável onde faz sentido)
-        try:
-            df_itens = join_impostos_itens(db, int(doc_id))
-        except Exception:
-            df_itens = pd.DataFrame()
-        if df_itens is not None and not df_itens.empty:
-            st.markdown("#### 🧾 Itens da Nota")
-            # Colunas de visualização (inclui impostos); editaremos apenas colunas base de 'itens'
-            cols_show = [c for c in [
-                "id","numero_item","descricao","codigo_produto","ncm","cfop","unidade",
-                "quantidade","valor_unitario","valor_total","desconto","outras_despesas",
-                "icms_valor","ipi_valor","pis_valor","cofins_valor","iss_valor",
-                "icms_aliquota","ipi_aliquota","pis_aliquota","cofins_aliquota","iss_aliquota"
-            ] if c in df_itens.columns]
-
-            # Colunas não editáveis (id, numero_item e colunas derivadas/impostos)
-            non_editable = [c for c in [
-                "id","numero_item","icms_valor","ipi_valor","pis_valor","cofins_valor","iss_valor",
-                "icms_aliquota","ipi_aliquota","pis_aliquota","cofins_aliquota","iss_aliquota"
-            ] if c in cols_show]
-
-            column_config={
-                "quantidade": st.column_config.NumberColumn("Quantidade", format="%.3f"),
-                "valor_unitario": st.column_config.NumberColumn("Vlr Unit", format="R$ %.4f"),
-                "valor_total": st.column_config.NumberColumn("Vlr Total", format="R$ %.2f"),
-                "desconto": st.column_config.NumberColumn("Desc", format="R$ %.2f"),
-                "outras_despesas": st.column_config.NumberColumn("Outras", format="R$ %.2f"),
-                "icms_valor": st.column_config.NumberColumn("ICMS (R$)", format="R$ %.2f"),
-                "ipi_valor": st.column_config.NumberColumn("IPI (R$)", format="R$ %.2f"),
-                "pis_valor": st.column_config.NumberColumn("PIS (R$)", format="R$ %.2f"),
-                "cofins_valor": st.column_config.NumberColumn("COFINS (R$)", format="R$ %.2f"),
-                "iss_valor": st.column_config.NumberColumn("ISS (R$)", format="R$ %.2f"),
-            }
-
-            df_view = df_itens[cols_show].sort_values(by=[c for c in ["numero_item","descricao"] if c in df_itens.columns])
-            edited_df = st.data_editor(
-                df_view,
-                use_container_width=True, height=320,
-                disabled=non_editable,
-                column_config=column_config,
-                key=f"grid_itens_single_{doc_id}"
-            )
-            download_button_for_df(df_view, "⬇️ Exportar Itens (CSV)", f"itens_{int(doc_id)}.csv", help_text="Itens com impostos por item, quando disponíveis.")
-
-            # Persistência de alterações: compara df_view x edited_df e atualiza tabela 'itens'
-            _, c_save_items = st.columns([8,2])
-            with c_save_items:
-                if st.button("Salvar Itens", type="primary", use_container_width=True, key=f"btn_save_itens_{doc_id}"):
-                    base = df_view.set_index("id") if "id" in df_view.columns else None
-                    new = edited_df.set_index("id") if "id" in edited_df.columns else None
-                    if base is None or new is None:
-                        st.warning("Tabela de itens precisa da coluna 'id' para salvar.")
-                    else:
-                        editable_cols = [c for c in cols_show if c not in non_editable]
-                        updates = 0
-                        for iid, row_new in new.iterrows():
-                            if iid in base.index:
-                                diffs = {c: row_new.get(c) for c in editable_cols if (str(base.loc[iid].get(c)) != str(row_new.get(c)))}
-                                if diffs:
-                                    sets = ", ".join([f"{k} = ?" for k in diffs.keys()])
-                                    vals = [row_new.get(k) for k in diffs.keys()]
-                                    try:
-                                        db.conn.execute(f"UPDATE itens SET {sets} WHERE id = ?", (*vals, int(iid)))
-                                        updates += 1
-                                    except Exception as e:
-                                        st.error(f"Falha ao atualizar item {iid}: {e}")
-                        if updates:
-                            db.conn.commit()
-                            st.success(f"{updates} item(ns) atualizado(s).")
-                            st.rerun()
-                        else:
-                            st.info("Nenhuma alteração em itens.")
-        else:
-            st.info("Sem itens registrados para este documento.")
+        # (Seção duplicada de Itens removida para evitar widgets com keys repetidos)
 
         st.markdown("---")
         col_actions = st.columns(3)
-        if col_actions[0].button("✅ Aprovar (Processado)", use_container_width=True):
+        if col_actions[0].button("✅ Aprovar (Processado)", key=f"doc_approve_{doc_id}", use_container_width=True, disabled=(user_role!="admin")):
             try:
                 db.atualizar_documento_campo(int(doc_id), "status", "processado")
                 db.atualizar_documento_campo(int(doc_id), "motivo_rejeicao", "Aprovado manualmente")
@@ -1215,12 +1495,12 @@ def tab_auditoria(orch: Orchestrator, db: BancoDeDados):
             except Exception as e:
                 st.error(f"Falha ao aprovar: {e}")
 
-        if col_actions[1].button("🔁 Reprocessar", use_container_width=True):
+        if col_actions[1].button("🔁 Reprocessar", key=f"doc_reprocess_{doc_id}", use_container_width=True, disabled=(user_role!="admin")):
             with st.spinner("Reprocessando..."):
                 out = orch.reprocessar_documento(int(doc_id))
                 st.info(out.get("mensagem"))
 
-        if col_actions[2].button("♻️ Revalidar", use_container_width=True):
+        if col_actions[2].button("♻️ Revalidar", key=f"doc_revalidate_{doc_id}", use_container_width=True, disabled=(user_role not in {"admin","auditor","conferente"})):
             with st.spinner("Revalidando..."):
                 out = orch.revalidar_documento(int(doc_id))
                 if out.get("ok"):
@@ -1234,42 +1514,77 @@ def tab_auditoria(orch: Orchestrator, db: BancoDeDados):
                 st.json(meta)
             else:
                 st.info("Sem meta_json no documento.")
-        with st.expander("🧭 Timeline Cognitiva (Blackboard Decisions)", expanded=True):
+        with st.expander("🧭 Timeline Cognitiva (Blackboard Decisions)", expanded=False):
             _render_cognitive_timeline(meta)
 
-        # Contexto RAG (consulta semântica opcional por documento)
-        st.markdown("---")
-        with st.expander("🔎 Contexto RAG (semântico)", expanded=False):
-            qcol, act = st.columns([4,1])
-            with qcol:
-                qrag = st.text_input("Pergunta/termo para buscar no contexto deste documento", key=f"rag_q_{doc_id}")
-            with act:
-                buscar = st.button("Buscar", key=f"rag_btn_{doc_id}")
+        # Histórico de alterações e rollback
+        with st.expander("📝 Histórico de Alterações (Revisões)", expanded=False):
             try:
-                # Exibe chunks já indexados quando não há pergunta
-                if not qrag:
-                    df_chunks = db.query_table("rag_chunks", where=f"documento_id = {int(doc_id)}", limit=10)
-                    if df_chunks is not None and not df_chunks.empty:
-                        st.data_editor(df_chunks[[c for c in ["source","chunk"] if c in df_chunks.columns]], use_container_width=True, height=240, disabled=True, key=f"rag_chunks_{doc_id}")
+                df_rev = db.query_table("revisoes", where=f"documento_id = {int(doc_id)}", order_by="data_revisao DESC")
+            except Exception:
+                df_rev = pd.DataFrame()
+            if df_rev is None or df_rev.empty:
+                st.info("Sem histórico de alterações.")
+            else:
+                st.data_editor(df_rev[[c for c in ["id","campo","valor_anterior","valor_corrigido","usuario","data_revisao"] if c in df_rev.columns]], use_container_width=True, height=220, disabled=True, key=f"rev_hist_{doc_id}")
+                rev_id = st.number_input("ID da revisão para reverter", min_value=0, step=1, key=f"rev_rollback_id_{doc_id}")
+                if st.button("Reverter revisão selecionada", use_container_width=True, disabled=(user_role!="admin")) and rev_id>0:
+                    row = df_rev[df_rev["id"]==int(rev_id)]
+                    if row.empty:
+                        st.warning("ID de revisão não encontrado.")
                     else:
-                        st.info("Ainda não há contexto indexado para este documento.")
-                elif buscar:
-                    if getattr(orch, "rag", None) is None:
-                        st.warning("RAG não está configurado (verifique provider e chave da API de embeddings).")
-                    else:
-                        with st.spinner("Buscando no contexto..."):
-                            # Garante indexação deste documento e busca
-                            try:
-                                orch.rag.index_documents([int(doc_id)])
-                            except Exception:
-                                pass
-                            out = orch.rag.query(qrag, scope_doc_ids=[int(doc_id)], top_k=6)
-                            if out is not None and not out.empty:
-                                st.data_editor(out, use_container_width=True, height=260, disabled=True, key=f"rag_res_{doc_id}")
+                        r = row.iloc[0].to_dict()
+                        campo = str(r.get("campo") or "")
+                        val = r.get("valor_anterior")
+                        try:
+                            if campo.startswith("itens."):
+                                # formato itens.<id>.<col>
+                                _, sid, scol = campo.split(".", 2)
+                                db.conn.execute(f"UPDATE itens SET {scol} = ? WHERE id = ?", (val, int(sid)))
+                                db.conn.commit()
                             else:
-                                st.info("Nenhum trecho relevante encontrado para a consulta.")
-            except Exception as e:
-                st.error(f"Falha ao consultar RAG: {e}")
+                                db.atualizar_documento_campos(int(doc_id), **{campo: val})
+                            st.success("Reversão aplicada.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Falha ao reverter: {e}")
+
+        # Workflow de duplicidade: ações rápidas
+        try:
+            dup_ids = []
+            r = (meta.get("risk") or {})
+            if isinstance(r.get("duplicates"), list):
+                dup_ids = [int(x) for x in r.get("duplicates") if str(x).isdigit()]
+            if dup_ids:
+                with st.expander("🔗 Ações de Duplicidade", expanded=False):
+                    st.caption("Marque falsos positivos, arquive duplicatas ou vincule um original.")
+                    c1, c2, c3 = st.columns(3)
+                    target = c1.number_input("Vincular como duplicata de (ID)", min_value=0, step=1, key=f"dup_of_{doc_id}")
+                    if c2.button("Vincular", use_container_width=True, key=f"btn_dup_link_{doc_id}") and target>0:
+                        _update_meta_json(db, int(doc_id), {"risk": {"duplicate_of": int(target)}})
+                        db.atualizar_documento_campos(int(doc_id), status="quarentena")
+                        st.success(f"Documento marcado como duplicata de {int(target)}.")
+                        st.rerun()
+                    # Arquivar duplicata (este doc)
+                    if c3.button("Arquivar duplicata", use_container_width=True, key=f"btn_dup_archive_{doc_id}"):
+                        db.atualizar_documento_campos(int(doc_id), status="quarentena")
+                        st.success("Documento arquivado como duplicata.")
+                        st.rerun()
+                    # Lista de candidatos com ação de falso positivo
+                    for did in dup_ids[:20]:
+                        dcol1, dcol2 = st.columns([8,2])
+                        with dcol1:
+                            st.caption(f"Possível duplicata: ID {did}")
+                        with dcol2:
+                            if st.button("Falso positivo", key=f"dup_fp_{doc_id}_{did}"):
+                                # remove do array de duplicates
+                                newrisk = dict(r)
+                                newrisk["duplicates"] = [x for x in dup_ids if int(x)!=int(did)]
+                                _update_meta_json(db, int(doc_id), {"risk": newrisk})
+                                st.success(f"ID {did} removido da lista de duplicidade.")
+                                st.rerun()
+        except Exception:
+            pass
 
 def tab_analises(orch: Orchestrator, db: BancoDeDados):
     st.subheader("🤖 Análises & LLM (Chat)")
@@ -1526,8 +1841,63 @@ def tab_metricas(orch: Orchestrator, db: BancoDeDados):
                             temperature=0.2,
                             json_expected=False,
                         )
-                        content = out.get("content") or "Não foi possível gerar insights."
-                        st.markdown(content)
+                        # Se o LLM falhar ou retornar vazio, exibir motivo e usar fallback determinístico
+                        meta_out = out.get("meta") or {}
+                        err = meta_out.get("error")
+
+                        def _fallback_metric_insights(kpis: dict, por_tipo_acur: dict, por_tipo_erro: dict) -> str:
+                            insights = []
+                            acur = float(kpis.get("acuracia_media") or 0.0)
+                            tx_rev = float(kpis.get("taxa_revisao") or 0.0)
+                            t_med = float(kpis.get("tempo_medio") or 0.0)
+                            tx_err = float(kpis.get("taxa_erro") or 0.0)
+
+                            # Regras simples e acionáveis
+                            if acur < 90.0:
+                                insights.append(f"Acurácia média em {acur:.1f}% — priorize revisão de regras e fontes com maior ruído.")
+                            else:
+                                insights.append(f"Acurácia média saudável ({acur:.1f}%). Mantenha o pipeline atual e monitore variações.")
+
+                            if tx_rev >= 50.0:
+                                insights.append("Taxa de revisão acima de 50% — concentre esforços nos tipos com menor acurácia e ajuste tolerâncias.")
+                            elif tx_rev >= 25.0:
+                                insights.append("Taxa de revisão moderada — selecione amostras dos casos recorrentes para ajuste fino do validador.")
+
+                            if tx_err > 2.0:
+                                insights.append(f"Taxa de erro em {tx_err:.1f}% — verifique documentos em 'quarentena' e reprocessos falhos.")
+
+                            if t_med > 1.0:
+                                insights.append(f"Tempo médio por processamento {t_med:.2f}s — avalie índices do SQLite (ANALYZE/VACUUM) e lotes.")
+
+                            # Piores e melhores por tipo (quando disponível)
+                            try:
+                                if por_tipo_acur:
+                                    worst = min(por_tipo_acur.items(), key=lambda kv: float(kv[1] or 0.0))
+                                    best = max(por_tipo_acur.items(), key=lambda kv: float(kv[1] or 0.0))
+                                    insights.append(
+                                        f"Pior desempenho: {worst[0]} ({float(worst[1])*100:.1f}% conf.). Melhor: {best[0]} ({float(best[1])*100:.1f}%)."
+                                    )
+                                if por_tipo_erro:
+                                    worst_err = max(por_tipo_erro.items(), key=lambda kv: float(kv[1] or 0.0))
+                                    if float(worst_err[1]) > 0:
+                                        insights.append(f"Maior taxa de erro em {worst_err[0]} ({float(worst_err[1])*100:.1f}%).")
+                            except Exception:
+                                pass
+
+                            if not insights:
+                                insights = ["Sem variações significativas detectadas — continue monitorando os indicadores principais."]
+                            bullets = "\n".join(f"- {msg}" for msg in insights)
+                            return bullets
+
+                        content = (out.get("content") or "").strip()
+                        if err:
+                            st.warning(f"LLM não respondeu: {err}")
+                        if not content:
+                            # Fallback local
+                            fb_text = _fallback_metric_insights(kpis, d1, d2)
+                            st.markdown(fb_text)
+                        else:
+                            st.markdown(content)
             else:
                 st.warning("O LLM não está configurado na barra lateral.")
     except Exception as e:
@@ -1536,7 +1906,8 @@ def tab_metricas(orch: Orchestrator, db: BancoDeDados):
 
 def tab_admin(db: BancoDeDados):
     st.subheader("⚙️ Administração")
-    a1, a2, a3 = st.tabs(["Gerenciar Usuários", "Criar Novo Usuário", "Manutenção do Banco"])
+    tabs_admin = ["Gerenciar Usuários", "Criar Novo Usuário", "Manutenção do Banco", "Regras Fiscais"]
+    a1, a2, a3, a4 = st.tabs(tabs_admin)
 
     with a1:
         try:
@@ -1664,8 +2035,23 @@ def tab_admin(db: BancoDeDados):
 
     with a3:
         st.markdown("### 🧰 Manutenção do Banco (SQLite)")
-        st.caption("Operações seguras para melhorar performance e baixar backup.")
-        c1, c2, c3 = st.columns([1.2, 1.2, 2.6])
+        st.caption("Operações seguras para verificar integridade, melhorar performance e baixar backup.")
+        try:
+            st.text(f"Caminho do banco: {db.db_file_path()}")
+        except Exception:
+            pass
+        c0, c1, c2, c3 = st.columns([1.8, 1.2, 1.2, 2.6])
+        with c0:
+            if st.button("PRAGMA integrity_check", use_container_width=True):
+                try:
+                    row = db.conn.execute("PRAGMA integrity_check").fetchone()
+                    msg = row[0] if row and len(row) > 0 else "(sem retorno)"
+                    if str(msg).lower() == "ok":
+                        st.success("Integridade OK")
+                    else:
+                        st.warning(f"Integridade: {msg}")
+                except Exception as e:
+                    st.error(f"Falha no integrity_check: {e}")
         with c1:
             if st.button("ANALYZE", use_container_width=True):
                 try:
@@ -1682,9 +2068,7 @@ def tab_admin(db: BancoDeDados):
                     st.error(f"Falha no VACUUM: {e}")
         with c3:
             try:
-                # Gera snapshot de leitura do arquivo do banco
                 db_path = db.db_file_path()
-                data = b""
                 with open(db_path, "rb") as f:
                     data = f.read()
                 st.download_button(
@@ -1696,6 +2080,49 @@ def tab_admin(db: BancoDeDados):
                 )
             except Exception as e:
                 st.error(f"Falha ao preparar snapshot: {e}")
+    with a4:
+        st.markdown("### 📜 Regras Fiscais (YAML)")
+        st.caption("Edite as regras e salve. Opcionalmente, revalide um documento com as regras atuais.")
+        content = ""
+        try:
+            if REGRAS_FISCAIS_PATH.exists():
+                content = REGRAS_FISCAIS_PATH.read_text(encoding="utf-8")
+        except Exception:
+            content = ""
+        text = st.text_area("Conteúdo YAML", value=content, height=260, key="yaml_rules")
+        csa, csr, ctest = st.columns([2,2,3])
+        with csa:
+            salvar = st.button("Salvar Regras", type="primary", use_container_width=True)
+        with csr:
+            validar = st.button("Validar YAML", use_container_width=True)
+        with ctest:
+            doc_to_test = st.number_input("Doc ID p/ Revalidar", min_value=0, step=1, key="yaml_test_doc")
+            testar = st.button("Revalidar Doc", use_container_width=True)
+
+        if validar:
+            if yaml is None:
+                st.warning("Biblioteca YAML não disponível.")
+            else:
+                try:
+                    _ = yaml.safe_load(text or "")
+                    st.success("YAML válido.")
+                except Exception as e:
+                    st.error(f"YAML inválido: {e}")
+        if salvar:
+            try:
+                REGRAS_FISCAIS_PATH.write_text(text or "", encoding="utf-8")
+                st.success("Regras salvas em arquivo.")
+            except Exception as e:
+                st.error(f"Falha ao salvar: {e}")
+        if testar and int(doc_to_test) > 0:
+            try:
+                # simples: a validação usa as regras atuais do arquivo via Validador
+                from validacao import ValidadorFiscal
+                val = ValidadorFiscal()
+                val.validar_documento(doc_id=int(doc_to_test), db=db)
+                st.success(f"Documento {int(doc_to_test)} revalidado com as regras atuais.")
+            except Exception as e:
+                st.error(f"Falha ao revalidar: {e}")
 
 # =================== MAIN ===================
 def main():
@@ -1708,7 +2135,8 @@ def main():
         pass
 
     if st.session_state.admin_just_created:
-        st.toast("Admin padrão (admin@i2a2.academy / admin123) foi criado!", icon="🎉")
+        # Mensagem genérica sem expor credenciais
+        st.toast("Conta de administrador criada. Altere a senha nas configurações.", icon="🎉")
         st.session_state.admin_just_created = False
 
     if not st.session_state.logged_in:
@@ -1754,6 +2182,38 @@ def main():
                                 except Exception as e:
                                     st.error(f"Erro ao criar usuário (email pode já existir): {e}")
         return
+
+    # Hidratação antecipada da LLM antes de construir o Orchestrator e o cabeçalho
+    try:
+        if not st.session_state.get("_prefs_loaded"):
+            try:
+                prefs = (db.get_config("llm_settings", usuario=st.session_state.user_email) or {})
+                if isinstance(prefs, dict):
+                    st.session_state.llm_provider = prefs.get("provider", st.session_state.llm_provider)
+                    st.session_state.llm_model = prefs.get("model", st.session_state.llm_model)
+                    st.session_state.llm_api_key = prefs.get("api_key", st.session_state.llm_api_key)
+                chat_p = db.get_config("chat_prefs", usuario=st.session_state.user_email) or {}
+                if isinstance(chat_p, dict):
+                    st.session_state.chat_order_desc = bool(chat_p.get("order_desc", st.session_state.chat_order_desc))
+                    st.session_state.chat_show_code = bool(chat_p.get("show_code", st.session_state.chat_show_code))
+            except Exception:
+                pass
+            st.session_state._prefs_loaded = True
+
+        if (
+            not st.session_state.llm_hydrated
+            and st.session_state.llm_instance is None
+            and st.session_state.llm_provider
+            and st.session_state.llm_model
+        ):
+            st.session_state.llm_instance = configure_llm(
+                st.session_state.llm_provider,
+                st.session_state.llm_model,
+                st.session_state.llm_api_key,
+            )
+            st.session_state.llm_hydrated = True
+    except Exception:
+        pass
 
     orch = Orchestrator(
         db=db,
