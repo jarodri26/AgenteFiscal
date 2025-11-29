@@ -91,23 +91,6 @@ class AgenteXMLParser:
             extras["emitente_endereco_tokens"] = self._norm_tokens(campos.get("emitente_endereco"))
             extras["destinatario_endereco_tokens"] = self._norm_tokens(campos.get("destinatario_endereco"))
 
-            # 3.3) Checagem de duplicidade por hash antes de persistir
-            doc_hash = self.db.hash_bytes(conteudo)
-            existing_id = None
-            try:
-                existing_id = self.db.find_documento_by_hash(doc_hash)
-            except Exception:
-                existing_id = None
-
-            if existing_id:
-                # Documento já existe — não reinsere itens/impostos nem salva arquivo novamente.
-                doc_id = int(existing_id)
-                status = (self.db.get_documento(doc_id) or {}).get("status") or "processado"
-                # Mantém tipos e métricas; não sobrescreve caminhos do arquivo.
-                log.info("Documento duplicado detectado pelo hash; retornando existente (id=%s).", doc_id)
-                # Encaminha para o finally para registrar extracao/métricas leves
-                return doc_id
-
             # 4) Salvar arquivo físico (mantemos como caminho_xml e caminho_arquivo)
             caminho_salvo = str(self.db.save_upload(nome, conteudo))
 
@@ -116,7 +99,7 @@ class AgenteXMLParser:
                 nome_arquivo=nome,
                 tipo=tipo,
                 origem=origem,
-                hash=doc_hash,
+                hash=self.db.hash_bytes(conteudo),
 
                 # Identificação
                 chave_acesso=campos.get("chave_acesso"),
@@ -222,9 +205,6 @@ class AgenteXMLParser:
             motivo_rejeicao = f"Erro no processamento: {e_proc}"
             if doc_id > 0:
                 self.db.atualizar_documento_campos(doc_id, status=status, motivo_rejeicao=motivo_rejeicao)
-            else:
-                # Registra o XML como inválido/quarentena para não perder o arquivo e manter rastreabilidade
-                return self._registrar_xml_invalido(nome, conteudo, origem, motivo_rejeicao, t_start)
 
         finally:
             # 8) Registro de extração + métricas
@@ -420,22 +400,6 @@ class AgenteXMLParser:
         # Transporte
         modal_frete, placa, uf_placa, peso_b, peso_l, q_vol = self._extrair_transporte(root)
 
-        # Componentes de endereço (emitente/destinatário)
-        emit_logr = self._text(end_emit, "xLgr")
-        emit_num  = self._text(end_emit, "nro")
-        emit_cpl  = self._text(end_emit, "xCpl")
-        emit_bai  = self._text(end_emit, "xBairro")
-        emit_mun  = self._text(end_emit, "xMun")
-        emit_uf   = self._text(end_emit, "UF")
-        emit_cep  = self._text(end_emit, "CEP")
-        dest_logr = self._text(end_dest, "xLgr")
-        dest_num  = self._text(end_dest, "nro")
-        dest_cpl  = self._text(end_dest, "xCpl")
-        dest_bai  = self._text(end_dest, "xBairro")
-        dest_mun  = self._text(end_dest, "xMun")
-        dest_uf   = self._text(end_dest, "UF")
-        dest_cep  = self._text(end_dest, "CEP")
-
         campos = {
             # Identificação
             "numero_nota": self._text(ide, "nNF"),
@@ -449,14 +413,9 @@ class AgenteXMLParser:
             "emitente_cpf": self._text(emit, "CPF"),
             "emitente_ie": self._text(emit, "IE"),
             "emitente_im": self._text(emit, "IM"),
-            "emitente_uf": emit_uf,
-            "emitente_municipio": emit_mun,
+            "emitente_uf": self._text(end_emit, "UF"),
+            "emitente_municipio": self._text(end_emit, "xMun"),
             "emitente_endereco": self._build_address(end_emit),
-            "emitente_logradouro": emit_logr,
-            "emitente_numero": emit_num,
-            "emitente_complemento": emit_cpl,
-            "emitente_bairro": emit_bai,
-            "emitente_cep": emit_cep,
 
             # Destinatário (completos)
             "destinatario_nome": self._text(dest, "xNome"),
@@ -464,14 +423,9 @@ class AgenteXMLParser:
             "destinatario_cpf": self._text(dest, "CPF"),
             "destinatario_ie": self._text(dest, "IE"),
             "destinatario_im": self._text(dest, "IM"),
-            "destinatario_uf": dest_uf,
-            "destinatario_municipio": dest_mun,
+            "destinatario_uf": self._text(end_dest, "UF"),
+            "destinatario_municipio": self._text(end_dest, "xMun"),
             "destinatario_endereco": self._build_address(end_dest),
-            "destinatario_logradouro": dest_logr,
-            "destinatario_numero": dest_num,
-            "destinatario_complemento": dest_cpl,
-            "destinatario_bairro": dest_bai,
-            "destinatario_cep": dest_cep,
 
             # Datas / Totais
             "data_emissao": _parse_date_like(self._text_any(ide, ("dhEmi", "dEmi"))),
@@ -552,22 +506,6 @@ class AgenteXMLParser:
         placa = self._text(veic, "placa") if veic is not None else None
         uf_placa = self._text(veic, "UF") if veic is not None else None
 
-        # Componentes de endereço onde disponíveis
-        emit_logr = self._text(end_emit, "xLgr")
-        emit_num  = self._text(end_emit, "nro")
-        emit_cpl  = self._text(end_emit, "xCpl")
-        emit_bai  = self._text(end_emit, "xBairro")
-        emit_mun  = self._text(end_emit, "xMun")
-        emit_uf   = self._text(end_emit, "UF")
-        dest_logr = self._text(end_dest, "xLgr") or self._text(end_rem, "xLgr")
-        dest_num  = self._text(end_dest, "nro") or self._text(end_rem, "nro")
-        dest_cpl  = self._text(end_dest, "xCpl") or self._text(end_rem, "xCpl")
-        dest_bai  = self._text(end_dest, "xBairro") or self._text(end_rem, "xBairro")
-        dest_mun  = self._text(end_dest, "xMun") or self._text(end_rem, "xMun")
-        dest_uf   = self._text(end_dest, "UF") or self._text(end_rem, "UF")
-        emit_cep  = self._text(end_emit, "CEP")
-        dest_cep  = self._text(end_dest, "CEP") or self._text(end_rem, "CEP")
-
         campos = {
             "numero_nota": self._text(ide, "nCT"),
             "serie": self._text(ide, "serie"),
@@ -576,24 +514,14 @@ class AgenteXMLParser:
             "emitente_nome": self._text(emit, "xNome"),
             "emitente_cnpj": self._text(emit, "CNPJ"),
             "emitente_ie": self._text(emit, "IE"),
-            "emitente_uf": emit_uf,
-            "emitente_municipio": emit_mun,
-            "emitente_logradouro": emit_logr,
-            "emitente_numero": emit_num,
-            "emitente_complemento": emit_cpl,
-            "emitente_bairro": emit_bai,
-            "emitente_cep": emit_cep,
+            "emitente_uf": self._text(end_emit, "UF"),
+            "emitente_municipio": self._text(end_emit, "xMun"),
 
             "destinatario_nome": self._text(dest, "xNome"),
             "destinatario_cnpj": self._text(dest, "CNPJ"),
             "destinatario_ie": self._text(dest, "IE"),
-            "destinatario_uf": dest_uf,
-            "destinatario_municipio": dest_mun,
-            "destinatario_logradouro": dest_logr,
-            "destinatario_numero": dest_num,
-            "destinatario_complemento": dest_cpl,
-            "destinatario_bairro": dest_bai,
-            "destinatario_cep": dest_cep,
+            "destinatario_uf": self._text(end_dest, "UF") or self._text(end_rem, "UF"),
+            "destinatario_municipio": self._text(end_dest, "xMun") or self._text(end_rem, "xMun"),
 
             # Endereços completos
             "emitente_endereco": self._build_address(end_emit),
@@ -648,14 +576,6 @@ class AgenteXMLParser:
         placa = self._text(veic_tr, "placa") if veic_tr is not None else None
         uf_placa = self._text(veic_tr, "UF") if veic_tr is not None else None
 
-        # Componentes do emitente
-        emit_logr = self._text(end_emit, "xLgr")
-        emit_num  = self._text(end_emit, "nro")
-        emit_cpl  = self._text(end_emit, "xCpl")
-        emit_bai  = self._text(end_emit, "xBairro")
-        emit_mun  = self._text(end_emit, "xMun")
-        emit_uf   = self._text(end_emit, "UF")
-
         campos = {
             "numero_nota": self._text(ide, "nMDF"),
             "serie": self._text(ide, "serie"),
@@ -664,13 +584,9 @@ class AgenteXMLParser:
             "emitente_nome": self._text(emit, "xNome"),
             "emitente_cnpj": self._text(emit, "CNPJ"),
             "emitente_ie": self._text(emit, "IE"),
-            "emitente_uf": emit_uf,
-            "emitente_municipio": emit_mun,
+            "emitente_uf": self._text(end_emit, "UF"),
+            "emitente_municipio": self._text(end_emit, "xMun"),
             "emitente_endereco": self._build_address(end_emit),
-            "emitente_logradouro": emit_logr,
-            "emitente_numero": emit_num,
-            "emitente_complemento": emit_cpl,
-            "emitente_bairro": emit_bai,
 
             "destinatario_nome": None,
             "destinatario_cnpj": None,
@@ -742,22 +658,6 @@ class AgenteXMLParser:
                 valor_pag = round(vtotal, 2)
         troco = self._parse_number(self._first_text_by_local_name(pgto, "vTroco"), decimals=2) if pgto is not None else None
 
-        # Componentes
-        emit_logr = self._text(end_emit, "xLgr") or self._get_text_local(end_emit, "Logradouro")
-        emit_num  = self._text(end_emit, "nro") or self._get_text_local(end_emit, "Numero")
-        emit_cpl  = self._text(end_emit, "xCpl") or self._get_text_local(end_emit, "Complemento")
-        emit_bai  = self._text(end_emit, "xBairro") or self._get_text_local(end_emit, "Bairro")
-        emit_mun  = self._text(end_emit, "xMun")
-        emit_uf   = self._text(end_emit, "UF")
-        dest_logr = self._text(end_dest, "xLgr") or self._get_text_local(end_dest, "Logradouro")
-        dest_num  = self._text(end_dest, "nro") or self._get_text_local(end_dest, "Numero")
-        dest_cpl  = self._text(end_dest, "xCpl") or self._get_text_local(end_dest, "Complemento")
-        dest_bai  = self._text(end_dest, "xBairro") or self._get_text_local(end_dest, "Bairro")
-        dest_mun  = self._text(end_dest, "xMun")
-        dest_uf   = self._text(end_dest, "UF")
-        emit_cep  = self._text(end_emit, "CEP") or self._get_text_local(end_emit, "CEP")
-        dest_cep  = self._text(end_dest, "CEP") or self._get_text_local(end_dest, "CEP")
-
         campos = {
             "numero_nota": self._text(ide, "nCFe") or self._text(ide, "nNF"),
             "serie": self._text(ide, "serie"),
@@ -766,26 +666,16 @@ class AgenteXMLParser:
             "emitente_nome": self._text(emit, "xNome"),
             "emitente_cnpj": self._text(emit, "CNPJ"),
             "emitente_ie": self._text(emit, "IE"),
-            "emitente_uf": emit_uf,
-            "emitente_municipio": emit_mun,
+            "emitente_uf": self._text(end_emit, "UF"),
+            "emitente_municipio": self._text(end_emit, "xMun"),
             "emitente_endereco": self._build_address(end_emit),
-            "emitente_logradouro": emit_logr,
-            "emitente_numero": emit_num,
-            "emitente_complemento": emit_cpl,
-            "emitente_bairro": emit_bai,
-            "emitente_cep": emit_cep,
 
             "destinatario_nome": self._text(dest, "xNome"),
             "destinatario_cnpj": self._text(dest, "CNPJ"),
             "destinatario_ie": self._text(dest, "IE"),
-            "destinatario_uf": dest_uf,
-            "destinatario_municipio": dest_mun,
+            "destinatario_uf": self._text(end_dest, "UF"),
+            "destinatario_municipio": self._text(end_dest, "xMun"),
             "destinatario_endereco": self._build_address(end_dest),
-            "destinatario_logradouro": dest_logr,
-            "destinatario_numero": dest_num,
-            "destinatario_complemento": dest_cpl,
-            "destinatario_bairro": dest_bai,
-            "destinatario_cep": dest_cep,
 
             "data_emissao": _parse_date_like(self._text_any(ide, ("dhEmi", "dEmi"))),
             "valor_total": self._parse_number(
@@ -819,96 +709,40 @@ class AgenteXMLParser:
         return campos, {}
 
     def _extrair_campos_nfse(self, root: ET.Element) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Extrai NFSe cobrindo múltiplas variantes (Prestador/PrestadorServico, emit; Tomador/toma)."""
-        # Nós possíveis
-        prest = (
-            self._find(root, ".//{*}PrestadorServico") or
-            self._find(root, ".//{*}Prestador") or
-            self._find(root, ".//{*}prest")
-        )
-        toma = (
-            self._find(root, ".//{*}TomadorServico") or
-            self._find(root, ".//{*}Tomador") or
-            self._find(root, ".//{*}toma")
-        )
-        emit_node = self._find(root, ".//{*}emit") or prest
+        prest = self._find(root, ".//{*}PrestadorServico") or self._find(root, ".//{*}Prestador")
+        toma = self._find(root, ".//{*}TomadorServico") or self._find(root, ".//{*}Tomador")
 
-        # Identificação
-        emit_nome = (
-            self._get_text(emit_node, ".//{*}xNome")
-            or self._get_text(prest, ".//{*}RazaoSocial")
-            or self._get_text(prest, ".//{*}NomeFantasia")
-            or self._get_text(prest, ".//{*}xNome")
-        )
-        dest_nome = (
-            self._get_text(toma, ".//{*}RazaoSocial")
-            or self._get_text(toma, ".//{*}xNome")
-            or self._get_text(toma, ".//{*}Nome")
-        )
+        emit_nome = self._get_text(prest, ".//{*}RazaoSocial") or self._get_text(prest, ".//{*}NomeFantasia") or self._get_text(prest, ".//{*}xNome")
+        dest_nome = self._get_text(toma, ".//{*}RazaoSocial") or self._get_text(toma, ".//{*}xNome") or self._get_text(toma, ".//{*}Nome")
 
-        emit_cnpj = (
-            self._get_text(emit_node, ".//{*}CNPJ")
-            or self._get_text(prest, ".//{*}Cnpj")
-            or self._get_text(prest, ".//{*}CNPJ")
-        )
-        emit_cpf = (
-            self._get_text(emit_node, ".//{*}CPF")
-            or self._get_text(prest, ".//{*}Cpf")
-            or self._get_text(prest, ".//{*}CPF")
-        )
+        emit_cnpj = self._get_text(prest, ".//{*}Cnpj") or self._get_text(prest, ".//{*}CNPJ")
+        emit_cpf = self._get_text(prest, ".//{*}Cpf") or self._get_text(prest, ".//{*}CPF")
         dest_cnpj = self._get_text(toma, ".//{*}Cnpj") or self._get_text(toma, ".//{*}CNPJ")
         dest_cpf = self._get_text(toma, ".//{*}Cpf") or self._get_text(toma, ".//{*}CPF")
 
-        # Endereços
-        end_emit = (
-            self._find(emit_node, ".//{*}enderNac")
-            or self._find(emit_node, ".//{*}Endereco")
-        )
-        end_toma = (
-            self._find(toma, ".//{*}end")
-            or self._find(toma, ".//{*}Endereco")
-            or self._find(toma, ".//{*}endNac")
-        )
-        emit_endereco = self._build_address_nfse(end_emit) if end_emit is not None else None
+        end_prest = self._find(prest, ".//{*}Endereco")
+        end_toma = self._find(toma, ".//{*}Endereco")
+        emit_endereco = self._build_address_nfse(end_prest) if end_prest is not None else None
         dest_endereco = self._build_address_nfse(end_toma) if end_toma is not None else None
 
-        # Componentes de endereço (NFSe tem variações de nomes)
-        emit_logr = (self._get_text_local(end_emit, "Endereco") or self._get_text_local(end_emit, "xLgr") or self._get_text_local(end_emit, "Logradouro"))
-        emit_num  = (self._get_text_local(end_emit, "Numero") or self._get_text_local(end_emit, "nro"))
-        emit_cpl  = (self._get_text_local(end_emit, "Complemento") or self._get_text_local(end_emit, "xCpl"))
-        emit_bai  = (self._get_text_local(end_emit, "Bairro") or self._get_text_local(end_emit, "xBairro"))
-        emit_cep  = (self._get_text_local(end_emit, "CEP") or self._get_text_local(end_emit, "Cep"))
-        dest_logr = (self._get_text_local(end_toma, "Endereco") or self._get_text_local(end_toma, "xLgr") or self._get_text_local(end_toma, "Logradouro"))
-        dest_num  = (self._get_text_local(end_toma, "Numero") or self._get_text_local(end_toma, "nro"))
-        dest_cpl  = (self._get_text_local(end_toma, "Complemento") or self._get_text_local(end_toma, "xCpl"))
-        dest_bai  = (self._get_text_local(end_toma, "Bairro") or self._get_text_local(end_toma, "xBairro"))
-        dest_cep  = (self._get_text_local(end_toma, "CEP") or self._get_text_local(end_toma, "Cep"))
-
-        # UF/Mun a partir do endereço ou dos códigos de município
-        emit_uf = self._get_text(end_emit, ".//{*}UF") or self._get_text(end_emit, ".//{*}Estado")
-        dest_uf = self._get_text(end_toma, ".//{*}UF") or self._get_text(end_toma, ".//{*}Estado")
-        emit_mun = self._get_text(end_emit, ".//{*}xMun") or self._get_text(end_emit, ".//{*}Municipio")
-        dest_mun = self._get_text(end_toma, ".//{*}xMun") or self._get_text(end_toma, ".//{*}Municipio")
+        # UF/Mun: tenta por endereço; se não houver, usa códigos de município
+        emit_uf = self._get_text(end_prest, ".//{*}Estado") or self._get_text(end_prest, ".//{*}UF")
+        dest_uf = self._get_text(end_toma, ".//{*}Estado") or self._get_text(end_toma, ".//{*}UF")
+        emit_mun = self._get_text(end_prest, ".//{*}Municipio") or self._get_text(end_prest, ".//{*}xMun")
+        dest_mun = self._get_text(end_toma, ".//{*}Municipio") or self._get_text(end_toma, ".//{*}xMun")
 
         if not emit_uf:
-            cod_mun_emit = (
-                self._get_text(end_emit, ".//{*}cMun")
-                or self._get_text(emit_node, ".//{*}cMun")
-                or self._get_text(prest, ".//{*}CodigoMunicipioPrestador")
-                or self._get_text(root, ".//{*}CodigoMunicipio")
-            )
-            emit_uf = self._uf_from_cod_municipio(cod_mun_emit) or emit_uf
+            cod_mun_prest = self._get_text(prest, ".//{*}CodigoMunicipioPrestador") or self._get_text(root, ".//{*}CodigoMunicipio")
+            uf_from_code = self._uf_from_cod_municipio(cod_mun_prest)
+            if uf_from_code:
+                emit_uf = uf_from_code
         if not dest_uf:
-            cod_mun_toma = (
-                self._get_text(end_toma, ".//{*}cMun")
-                or self._get_text(toma, ".//{*}CodigoMunicipioTomador")
-                or self._get_text(toma, ".//{*}CodigoMunicipio")
-            )
-            dest_uf = self._uf_from_cod_municipio(cod_mun_toma) or dest_uf
+            cod_mun_toma = self._get_text(toma, ".//{*}CodigoMunicipioTomador") or self._get_text(toma, ".//{*}CodigoMunicipio")
+            uf_from_code = self._uf_from_cod_municipio(cod_mun_toma)
+            if uf_from_code:
+                dest_uf = uf_from_code
 
-        # Totais e datas
         valor_total = self._coalesce(
-            self._parse_number(self._get_text(root, ".//{*}vLiq"), decimals=2),
             self._parse_number(self._get_text(root, ".//{*}ValorServicos"), decimals=2),
             self._parse_number(self._get_text(root, ".//{*}vServ"), decimals=2),
             self._parse_number(self._get_text(root, ".//{*}ValorLiquidoNfse"), decimals=2),
@@ -916,9 +750,9 @@ class AgenteXMLParser:
 
         data_emissao = _parse_date_like(
             self._coalesce(
-                self._get_text(root, ".//{*}dhEmi"),
                 self._get_text(root, ".//{*}DataEmissao"),
                 self._get_text(root, ".//{*}dtEmissao"),
+                self._get_text(root, ".//{*}dhEmi"),
                 self._get_text(root, ".//{*}Competencia"),
             )
         )
@@ -934,16 +768,6 @@ class AgenteXMLParser:
             "destinatario_cnpj": dest_cnpj,
             "destinatario_cpf": dest_cpf,
             "destinatario_endereco": dest_endereco,
-            "emitente_logradouro": emit_logr,
-            "emitente_numero": emit_num,
-            "emitente_complemento": emit_cpl,
-            "emitente_bairro": emit_bai,
-            "emitente_cep": emit_cep,
-            "destinatario_logradouro": dest_logr,
-            "destinatario_numero": dest_num,
-            "destinatario_complemento": dest_cpl,
-            "destinatario_bairro": dest_bai,
-            "destinatario_cep": dest_cep,
 
             "emitente_uf": emit_uf,
             "emitente_municipio": emit_mun,
@@ -980,11 +804,7 @@ class AgenteXMLParser:
 
         extras: Dict[str, Any] = {}
         # Guardar códigos de serviço, alíquota ISS, deduções, CNAE, etc., quando existirem
-        cod_serv = (
-            self._get_text(root, ".//{*}ItemListaServico")
-            or self._get_text(root, ".//{*}CodigoServico")
-            or self._get_text(root, ".//{*}cTribNac")
-        )
+        cod_serv = self._get_text(root, ".//{*}ItemListaServico") or self._get_text(root, ".//{*}CodigoServico")
         if cod_serv:
             extras["servico/Codigo"] = cod_serv
 
@@ -1290,9 +1110,7 @@ class AgenteXMLParser:
                 return val
         return None
 
-    def _first_text_by_local_name(self, node: Optional[ET.Element], local_name: str) -> Optional[str]:
-        if node is None:
-            return None
+    def _first_text_by_local_name(self, node: ET.Element, local_name: str) -> Optional[str]:
         lname = local_name.lower()
         for el in node.iter():
             if el.tag.split("}", 1)[-1].lower() == lname and el.text:
@@ -1332,17 +1150,13 @@ class AgenteXMLParser:
         return _norm_ws(", ".join(parts)) if parts else None
 
     # ---------- XML helpers tolerantes ----------
-    def _iter_local(self, node: Optional[ET.Element], local: str) -> Iterable[ET.Element]:
-        if node is None:
-            return
+    def _iter_local(self, node: ET.Element, local: str) -> Iterable[ET.Element]:
         lname = local.lower()
         for el in node.iter():
             if el.tag.split("}", 1)[-1].lower() == lname:
                 yield el
 
-    def _find(self, node: Optional[ET.Element], xpath: str) -> Optional[ET.Element]:
-        if node is None:
-            return None
+    def _find(self, node: ET.Element, xpath: str) -> Optional[ET.Element]:
         m = re.fullmatch(r"\.//(?:\{\*\})?([A-Za-z0-9_:-]+)", (xpath or "").strip())
         if m:
             target = m.group(1)
@@ -1354,9 +1168,7 @@ class AgenteXMLParser:
         except Exception:
             return None
 
-    def _findall(self, node: Optional[ET.Element], xpath: str) -> List[ET.Element]:
-        if node is None:
-            return []
+    def _findall(self, node: ET.Element, xpath: str) -> List[ET.Element]:
         m = re.fullmatch(r"\.//(?:\{\*\})?([A-Za-z0-9_:-]+)", (xpath or "").strip())
         if m:
             target = m.group(1)
@@ -1367,22 +1179,8 @@ class AgenteXMLParser:
             return []
 
     def _get_text(self, node: Optional[ET.Element], xpath: str) -> Optional[str]:
-        """XPath-safe text getter with local-name wildcard support.
-        Accepts patterns like './/{*}Cnpj' and falls back to ElementTree find()."""
         if node is None:
             return None
-        # Suporte a './/{*}Tag' => busca por local-name ignorando namespace
-        try:
-            m = re.fullmatch(r"\.//(?:\{\*\})?([A-Za-z0-9_:-]+)", (xpath or "").strip())
-            if m:
-                target = m.group(1)
-                for el in self._iter_local(node, target):
-                    if el is not None and el.text:
-                        return el.text.strip()
-                return None
-        except Exception:
-            pass
-        # Fallback: find nativo (pode não suportar '{*}')
         try:
             el = node.find(xpath)
             if el is not None and el.text:
@@ -1400,13 +1198,8 @@ class AgenteXMLParser:
         return None
 
     def _get_attr(self, node: ET.Element, xpath: str, attr: str) -> Optional[str]:
-        """XPath-safe attribute getter with local-name support for the element path."""
         try:
-            # Use o _find tolerante a namespace
-            el = self._find(node, xpath)
-            if el is None:
-                # Fallback: tentativa direta
-                el = node.find(xpath)
+            el = node.find(xpath)
             if el is not None:
                 val = el.get(attr)
                 return val.strip() if isinstance(val, str) else None
